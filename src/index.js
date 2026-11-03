@@ -24,6 +24,7 @@ function allowed(ctx) {
   const id = String(ctx.from?.id || "");
   return allowedIds.size > 0 && allowedIds.has(id);
 }
+
 function run(command, args, cwd, timeoutMs, onOutput = () => {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -37,6 +38,7 @@ function run(command, args, cwd, timeoutMs, onOutput = () => {}) {
       setTimeout(() => child.kill("SIGKILL"), 5000).unref();
       reject(new Error("Render/install timeout reached."));
     }, timeoutMs);
+
     const collect = chunk => {
       const s = chunk.toString();
       output = (output + s).slice(-12000);
@@ -48,17 +50,17 @@ function run(command, args, cwd, timeoutMs, onOutput = () => {}) {
     child.on("close", code => {
       clearTimeout(timer);
       if (code === 0) resolve(output);
-      else reject(new Error(`Command exited with code ${code}\\n${output.slice(-4000)}`));
+      else reject(new Error(`Command exited with code ${code}\n${output.slice(-4000)}`));
     });
   });
 }
+
 async function safeExtract(zipPath, dest) {
-  // Reject path traversal and excessive entry count/expanded size.
   const directory = await unzipper.Open.file(zipPath);
   if (directory.files.length > 5000) throw new Error("ZIP contains too many files.");
   let total = 0;
   for (const entry of directory.files) {
-    const name = entry.path.replace(/\\\\/g, "/");
+    const name = entry.path.replace(/\\/g, "/");
     if (name.startsWith("/") || name.split("/").includes(".."))
       throw new Error("Unsafe ZIP path detected.");
     total += Number(entry.uncompressedSize || 0);
@@ -67,11 +69,11 @@ async function safeExtract(zipPath, dest) {
   }
   await directory.extract({ path: dest, concurrency: 8 });
 }
+
 async function findProjectRoot(dir, depth = 0) {
   if (depth > 3) return null;
   const entries = await fsp.readdir(dir, { withFileTypes: true });
-  if (entries.some(e => e.isFile() && e.name === "package.json") &&
-      entries.some(e => e.isFile() && e.name === "package.json")) return dir;
+  if (entries.some(e => e.isFile() && e.name === "package.json")) return dir;
   for (const e of entries) {
     if (e.isDirectory() && !["node_modules", ".git"].includes(e.name)) {
       const found = await findProjectRoot(path.join(dir, e.name), depth + 1);
@@ -80,21 +82,24 @@ async function findProjectRoot(dir, depth = 0) {
   }
   return null;
 }
+
 async function cleanup(dir) {
   if (dir) await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
 }
+
 bot.start(ctx => ctx.reply(
-  "🎬 Remotion Render Bot\\n\\n" +
-  "Reply ke ZIP project Remotion dengan /remotion untuk render MP4.\\n" +
-  "Gunakan hanya ZIP project milik sendiri/tepercaya.\\n\\n" +
+  "🎬 Remotion Render Bot\n\n" +
+  "Reply ke ZIP project Remotion dengan /remotion untuk render MP4.\n" +
+  "Gunakan hanya ZIP project milik sendiri/tepercaya.\n\n" +
   "/help — bantuan"
 ));
+
 bot.help(ctx => ctx.reply(
-  "Cara pakai:\\n" +
-  "1. Kirim ZIP project Remotion (berisi package.json dan entry point).\\n" +
-  "2. Reply pesan ZIP tersebut dengan /remotion.\\n" +
-  "3. Tunggu proses render dan bot mengirim MP4.\\n\\n" +
-  "/cancel — batalkan job aktif.\\n\\n" +
+  "Cara pakai:\n" +
+  "1. Kirim ZIP project Remotion (berisi package.json dan entry point).\n" +
+  "2. Reply pesan ZIP tersebut dengan /remotion.\n" +
+  "3. Tunggu proses render dan bot mengirim MP4.\n\n" +
+  "/cancel — batalkan job aktif.\n\n" +
   "Catatan: project ZIP menjalankan kode dan dependency. Hanya gunakan project tepercaya."
 ));
 
@@ -141,8 +146,8 @@ bot.command("remotion", async ctx => {
     if (!remotionPkg) throw new Error("Project tidak memiliki dependency 'remotion' di package.json.");
 
     await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
-      "📚 Menginstall dependency...\\nPastikan ZIP berasal dari project tepercaya.");
-    // npm ci when lockfile exists; otherwise npm install.
+      "📚 Menginstall dependency...\nPastikan ZIP berasal dari project tepercaya.");
+    
     const lockExists = fs.existsSync(path.join(projectRoot, "package-lock.json"));
     await run("npm", lockExists ? ["ci", "--no-audit", "--no-fund"] : ["install", "--no-audit", "--no-fund"],
       projectRoot, 10 * 60 * 1000);
@@ -152,15 +157,12 @@ bot.command("remotion", async ctx => {
     await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
       "🎬 Memulai Remotion render...");
 
-    // Optional render settings in package.json:
-    // "remotionBot": { "composition": "MyComp", "output": "out.mp4" }
     const settings = pkg.remotionBot || {};
     const outputName = path.basename(settings.output || "rendered-video.mp4");
     const outputPath = path.join(workDir, outputName);
     const entry = settings.entry || "src/index.js";
     const entryPath = path.join(projectRoot, entry);
     if (!fs.existsSync(entryPath)) {
-      // Remotion default entry candidates
       const candidates = ["src/index.ts", "src/index.tsx", "src/index.js", "src/index.jsx", "index.ts", "index.js"];
       const found = candidates.find(f => fs.existsSync(path.join(projectRoot, f)));
       if (!found) throw new Error("Entry Remotion tidak ditemukan. Atur remotionBot.entry di package.json.");
@@ -168,17 +170,26 @@ bot.command("remotion", async ctx => {
     }
     const composition = settings.composition;
     if (!composition) throw new Error("Tambahkan remotionBot.composition (ID Composition) di package.json.");
+
+    // Fix parameters untuk Railway headless environment & audio re-encode
     const renderArgs = [
-      "remotion", "render", settings.entry || entry,
+      "render", settings.entry || entry,
       composition, outputPath,
       "--codec", "h264",
+      "--audio-codec", "aac",
+      "--gl", "angle",
       "--log", "error"
     ];
-    await run("npx", renderArgs, projectRoot, TIMEOUT_MIN * 60 * 1000, () => {
+
+    // Gunakan binary remotion lokal yang terinstall di node_modules project
+    const localRemotionBin = path.join(projectRoot, "node_modules", ".bin", "remotion");
+    const execBin = fs.existsSync(localRemotionBin) ? localRemotionBin : "npx";
+    const execArgs = fs.existsSync(localRemotionBin) ? renderArgs : ["remotion", ...renderArgs];
+
+    await run(execBin, execArgs, projectRoot, TIMEOUT_MIN * 60 * 1000, () => {
       const now = Date.now();
       if (now - lastUpdate > 15000) {
         lastUpdate = now;
-        // Avoid Telegram flood; edit progress at most every 15 seconds.
         ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
           "🎬 Rendering video... Mohon tunggu.").catch(() => {});
       }
@@ -191,14 +202,14 @@ bot.command("remotion", async ctx => {
     await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
       `✅ Render selesai (${(stat.size / 1024 / 1024).toFixed(1)} MB). Mengirim video...`);
     await ctx.replyWithVideo({ source: outputPath }, {
-      caption: `🎬 Remotion Render selesai\\n📦 ${(stat.size / 1024 / 1024).toFixed(1)} MB`,
+      caption: `🎬 Remotion Render selesai\n📦 ${(stat.size / 1024 / 1024).toFixed(1)} MB`,
       supports_streaming: true
     });
     await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined, "✅ Selesai! Video MP4 sudah dikirim.");
   } catch (err) {
     const msg = String(err.message || err).slice(0, 3500);
     await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
-      `❌ Render gagal\\n\\n${msg}`).catch(() => {});
+      `❌ Render gagal\n\n${msg}`).catch(() => {});
   } finally {
     jobs.delete(userId);
     await cleanup(workDir);
@@ -210,7 +221,6 @@ bot.command("cancel", async ctx => {
   const job = jobs.get(String(ctx.from.id));
   if (!job) return ctx.reply("Tidak ada job aktif.");
   job.cancelled = true;
-  // Note: cancelling the current npm/remotion child is best-effort in this simple implementation.
   await ctx.reply("Permintaan cancel diterima. Proses akan berhenti saat mencapai checkpoint.");
 });
 
